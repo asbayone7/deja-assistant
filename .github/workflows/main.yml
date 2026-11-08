@@ -3,9 +3,6 @@ name: Build DEJA Android APK
 on:
   workflow_dispatch:
   push:
-    paths:
-      - 'DEJA_Android_Project/**'
-      - '.github/workflows/main.yml'
 
 permissions:
   contents: read
@@ -31,20 +28,18 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK components
-        run: |
-          yes | sdkmanager --licenses
-          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+        with:
+          packages: |
+            platforms;android-35
+            build-tools;35.0.0
+            platform-tools
 
       - name: Build DEJA
         working-directory: DEJA_Android_Project
         run: gradle --no-daemon assembleDebug
 
-      - name: Upload DEJA APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: DEJA-debug-apk
           path: DEJA_Android_Project/app/build/outputs/apk/debug/*.apk
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
