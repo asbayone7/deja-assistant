@@ -1,10 +1,43 @@
-name: DEJA Build Test
+name: Build DEJA Android APK
 
 on: [push, workflow_dispatch]
 
+permissions:
+  contents: read
+
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Test GitHub
-        run: echo "DEJA build workflow is working"
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android packages
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Compile DEJA
+        working-directory: DEJA_Android_Project
+        run: gradle --no-daemon assembleDebug
+
+      - name: Upload DEJA APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DEJA-Android-APK
+          path: DEJA_Android_Project/app/build/outputs/apk/debug/*.apk
