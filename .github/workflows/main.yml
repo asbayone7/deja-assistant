@@ -46,3 +46,5 @@ jobs:
         with:
           name: DEJA-debug-apk
           path: DEJA_Android_Project/app/build/outputs/apk/debug/*.apk
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
