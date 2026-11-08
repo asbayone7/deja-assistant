@@ -1,4 +1,4 @@
-      - name: Set up Android SDK
+       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
       - name: Install Android SDK packages
