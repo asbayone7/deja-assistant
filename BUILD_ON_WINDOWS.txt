@@ -1,0 +1,9 @@
+DEJA v0.5 — one consolidated Android Studio project
+
+1. Extract this ZIP.
+2. Android Studio > Open > choose DEJA_Android_Project (contains settings.gradle.kts).
+3. Allow Gradle sync and SDK downloads.
+4. Connect Samsung A06 with USB debugging enabled and approve the prompt.
+5. Select the phone and press Run.
+
+This is source code, not an APK. First build needs internet. See README.md for features, limitations, permissions, and offline testing.

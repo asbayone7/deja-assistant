@@ -1,0 +1,3 @@
+Oshiwambo support status
+
+The interface can display an Oshiwambo language selection, but complete speech recognition and text-to-speech are not included. Android's installed speech provider must explicitly support the selected Oshiwambo variety (for example, Oshindonga or Oshikwanyama). No compatible model/provider is bundled or verified in this project. Until a provider is selected and tested, DEJA should keep the written transcript visible and must not claim full Oshiwambo voice support.

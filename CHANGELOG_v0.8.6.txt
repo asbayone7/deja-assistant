@@ -1,0 +1,16 @@
+DEJA Android Project — v0.8.6
+
+Security improvements
+- Owner biometric authorization expires after 5 minutes.
+- AILI and MAGGY sessions expire after 15 minutes.
+- Added manual sign-out that immediately clears the active role and permissions.
+- Native authorization checks clear expired sessions before allowing protected actions.
+- Session status is refreshed in the interface every 15 seconds.
+- Hardened WebView navigation and access: external navigation is blocked; content access, file URL cross-access, mixed content and automatic popups are disabled.
+- Kept the app's bundled local interface and native Android action bridge.
+
+Project status
+- Version code: 12; version name: 0.8.6.
+- This is an incremental update to the existing Kotlin Android project.
+- No APK build or physical-device test was available in this environment.
+- OpenAI gateway deployment, production authentication/quotas, full Oshiwambo ASR/TTS, automatic SMS/call handling, and broader anti-theft controls remain unfinished or platform-dependent.

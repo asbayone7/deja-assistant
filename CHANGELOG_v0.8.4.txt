@@ -1,0 +1,15 @@
+DEJA v0.8.4 — PIN protection and owner-controlled profile reset
+
+Implemented in source:
+- Native PIN format validation (6–12 digits).
+- Persistent failed-attempt tracking for AILI and MAGGY.
+- Escalating pauses: 60 seconds after 5 failures, 5 minutes after 10, and 30 minutes after 15 or more.
+- Successful PIN verification clears the failed-attempt counter and lockout.
+- Owner-only profile reset, requiring the current owner biometric session.
+- Reset removes the selected profile's PIN hash/salt and all saved permissions.
+- Re-registration generates a fresh random salt and clears lockout history.
+- Updated app version to 0.8.4 (versionCode 10).
+
+Not verified:
+- Android compilation and physical-device behavior; no Gradle wrapper/Android SDK build was available in this environment.
+- PIN recovery is deliberately owner reset + new registration; there is no PIN reveal or remote recovery.
