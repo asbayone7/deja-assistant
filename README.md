@@ -84,3 +84,8 @@ See `CALLS_AND_MESSAGING_LIMITS.md` and `OSHIWAMBO_VOICE_STATUS.txt` for the pla
 ## OpenAI gateway deployment preparation (v0.8.7)
 
 A Render Blueprint is included as `render.yaml`. Deployment instructions are in `backend/README.md`. The gateway is not yet safe for unrestricted public use because real user authentication, per-user quotas, and monitoring still need to be added. Do not connect a released app until those protections are complete. An authorized adult must manage any API/hosting accounts and billing.
+
+
+## DEJA v0.8.9 — authenticated OpenAI gateway
+
+The backend now requires a signed 12-hour bearer token for `/v1/chat`. Android provides a native gateway sign-in dialog and encrypts the returned token using an AES-GCM key held in Android Keystore. Gateway credentials and the OpenAI API key remain server-side. See `backend/README.md` and `DEPLOYMENT_STATUS_v0.8.9.txt`.

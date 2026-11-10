@@ -1,0 +1,9 @@
+DEJA v0.8.9 — APK cloud-build workflow repair
+
+- Fixed the GitHub Actions Android SDK setup failure caused by the retired SDK package named "tools".
+- Explicitly requests platform-tools from android-actions/setup-android.
+- Installs Android platform 35 and build-tools 35.0.0 explicitly.
+- Adds read-only repository permissions and a build timeout.
+- Enables Gradle stack traces to make any remaining build failure easier to diagnose.
+
+This change repairs the build workflow; it does not itself prove an APK has compiled. A successful GitHub Actions run is still required.

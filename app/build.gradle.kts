@@ -10,8 +10,8 @@ android {
         applicationId = "com.asbaygarcia.deja"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
-        versionName = "0.8.6"
+        versionCode = 13
+        versionName = "0.8.8"
         val dejaApiBaseUrl = providers.gradleProperty("DEJA_API_BASE_URL").orElse("").get().replace("\\", "\\\\").replace("\"", "\\\"")
         buildConfigField("String", "DEJA_API_BASE_URL", "\"$dejaApiBaseUrl\"")
     }

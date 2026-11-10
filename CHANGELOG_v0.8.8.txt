@@ -1,0 +1,25 @@
+DEJA v0.8.8 — Secure AI gateway authentication
+
+Added:
+- Server-side login endpoint with constant-time credential comparison.
+- Signed HS256 access tokens with 12-hour expiry, issuer and audience validation.
+- Authentication middleware protects every AI chat request.
+- Login rate limiting and existing chat rate limiting.
+- Render Blueprint declares private gateway username/password and generated JWT signing secret.
+- Android native sign-in dialog; password field is masked.
+- Android stores the access token encrypted with AES-GCM and an Android Keystore key.
+- Android sends bearer token with AI requests, clears expired tokens, and prompts sign-in again.
+- AI sign-out control.
+
+Not done / not verified:
+- No GitHub push or Render deployment was performed.
+- No real OpenAI API key was configured or used.
+- No live endpoint or live AI request was tested.
+- Android/Kotlin compilation and physical-device testing were not available in this environment.
+- The gateway currently uses one shared login configured by the service administrator, not separate Asbay/AILI/MAGGY cloud identities.
+- Add persistent per-user quotas, audit logging, and account-level abuse monitoring before broad public distribution.
+
+Security reminders:
+- Never put the OpenAI API key, JWT signing secret, or gateway password in the APK, Git, ZIP, or chat.
+- Use HTTPS only.
+- Android Keystore protects the saved access token at rest; rooted/compromised devices can still expose an active session.

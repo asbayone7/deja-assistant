@@ -1,30 +1,25 @@
 # DEJA OpenAI gateway
 
-This Node.js service keeps the OpenAI API key on the server, not in the Android app. It exposes `POST /v1/chat` and `GET /health`.
+The Node.js gateway keeps the OpenAI API key on the server and requires signed bearer-token authentication before any AI request. The Android app signs in to `/v1/auth/login`; the gateway issues a 12-hour HS256 JWT. `/v1/chat` rejects requests without a valid token.
 
-## Deployment preparation (Render)
+## Render deployment
 
-A Render Blueprint is included at the project root as `render.yaml`. It configures the backend folder as the service root, Node.js 20, `npm install`, `npm start`, and `/health` as the health check.
+1. Connect the private GitHub repository to Render and deploy the Blueprint at the project root (`render.yaml`).
+2. In the Render service Environment page, set `OPENAI_API_KEY` to the private OpenAI API key. Never place it in Android, Git, a ZIP, or chat.
+3. Set `DEJA_GATEWAY_USERNAME` and `DEJA_GATEWAY_PASSWORD` to a unique DEJA gateway login. Use a long password not reused elsewhere.
+4. Render generates `DEJA_JWT_SECRET` from `generateValue: true`. Confirm it is at least 32 random bytes; do not share it.
+5. Keep `OPENAI_MODEL` set to a model enabled for the OpenAI account.
+6. Deploy. Check `https://YOUR-SERVICE.onrender.com/health`; it should return `ok: true` and `auth: required`.
+7. Build Android with the HTTPS service base URL: `gradle -PDEJA_API_BASE_URL=https://YOUR-SERVICE.onrender.com :app:assembleDebug`. No API key or JWT secret is passed to Gradle.
 
-**Important security gate:** this starter gateway currently has IP-based rate limiting but does not yet have real user authentication. Do not publish it for unrestricted public use or connect it to a released app until authenticated access, per-user quotas, and monitoring are implemented. A token embedded in the APK is not a secure substitute because APK contents can be inspected.
+## Authentication model and limitations
 
-When the authentication layer is ready, an adult account owner should:
-
-1. Create/connect the Render service from the project's Git repository and select the `render.yaml` Blueprint.
-2. In the service's Environment page, add `OPENAI_API_KEY` using a secret created for the DEJA backend. Never put the key in Git, this ZIP, Android code, or chat.
-3. Keep `OPENAI_MODEL` as `gpt-6-astra` unless the project owner intentionally selects another available model.
-4. Deploy and confirm that `https://<service>.onrender.com/health` returns `{ "ok": true, ... }`.
-5. Only after gateway authentication is implemented, build Android with the service's HTTPS base URL:
-
-   `gradle -PDEJA_API_BASE_URL=https://<service>.onrender.com :app:assembleDebug`
-
-The API key is stored only in Render's environment variables. Render documents this flow in its Node/Express deployment and environment-variable guides.
+- Login credentials are configured only as Render environment secrets. This is a single gateway account shared by installations, not per-person account management. Rotate credentials in Render if compromised.
+- The app stores the short-lived access token encrypted with an Android Keystore AES-GCM key. The token is never hard-coded into the APK.
+- Login is rate-limited (8 attempts per 15 minutes per source IP); chat is rate-limited (20 requests per minute per source IP). Add persistent per-account usage quotas and monitoring before broad public distribution.
+- Use HTTPS only. Do not expose a local or plain-HTTP gateway to the internet.
+- A successful `/health` check proves only that the service is running; it does not prove OpenAI credentials/model access. Complete a signed-in test chat to verify the live brain.
 
 ## Local development
 
-1. Install Node.js 20 or newer.
-2. Copy `.env.example` to `.env` and set `OPENAI_API_KEY` privately. Do not commit `.env`.
-3. Run `npm install` and `npm start`.
-4. Check `http://localhost:8080/health`.
-
-Do not use a public `http://` endpoint. Use HTTPS for deployment.
+Copy `.env.example` to `.env`, fill values locally, run `npm install` and `npm start`. Keep `.env` out of Git. Test health at `http://localhost:8080/health`; test login at `/v1/auth/login` and then send a bearer token to `/v1/chat`.

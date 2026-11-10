@@ -28,6 +28,16 @@ import java.util.concurrent.Executor
 import java.security.SecureRandom
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+import java.security.KeyStore
+import android.util.Base64
+import android.app.AlertDialog
+import android.widget.EditText
+import android.text.InputType
+import android.widget.LinearLayout
 
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var web: WebView
@@ -120,23 +130,36 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             engine.language = locale
             engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "DEJA_UTTERANCE")
         } }
+        @JavascriptInterface fun requestAiLoginDialog() { runOnUiThread { showAiLoginDialog() } }
+        @JavascriptInterface fun signOutAi() {
+            clearAiToken()
+            runOnUiThread { web.evaluateJavascript("window.onDejaAiAuthResponse && window.onDejaAiAuthResponse(false, 'Signed out from DEJA AI.')", null) }
+        }
         @JavascriptInterface fun askAi(message: String, language: String) {
             val prompt = message.trim()
             if (prompt.isEmpty() || prompt.length > 4000) { notifyStatus("Please enter a message under 4,000 characters."); return }
             val baseUrl = BuildConfig.DEJA_API_BASE_URL.trim().trimEnd('/')
             if (baseUrl.isEmpty()) { runOnUiThread { notifyStatus("OpenAI brain is not connected yet. Configure DEJA_API_BASE_URL and deploy the secure backend.") }; return }
+            val token = readAiToken()
+            if (token.isNullOrBlank()) { runOnUiThread { web.evaluateJavascript("window.onDejaAuthRequired && window.onDejaAuthRequired()", null) }; return }
             aiExecutor.execute {
                 var connection: HttpURLConnection? = null
                 try {
                     connection = (URL("$baseUrl/v1/chat").openConnection() as HttpURLConnection).apply {
                         requestMethod = "POST"; connectTimeout = 15000; readTimeout = 45000
                         doOutput = true; setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                        setRequestProperty("Authorization", "Bearer $token")
                     }
                     val body = org.json.JSONObject().put("message", prompt).put("language", language).toString()
                     OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { it.write(body) }
                     val code = connection.responseCode
                     val stream = if (code in 200..299) connection.inputStream else connection.errorStream
                     val responseText = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                    if (code == 401) {
+                        clearAiToken()
+                        runOnUiThread { web.evaluateJavascript("window.onDejaAuthRequired && window.onDejaAuthRequired()", null) }
+                        return@execute
+                    }
                     if (code !in 200..299) throw IllegalStateException("AI service returned HTTP $code")
                     val answer = org.json.JSONObject(responseText).optString("reply").trim()
                     if (answer.isEmpty()) throw IllegalStateException("AI service returned an empty response")
@@ -290,6 +313,80 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         @JavascriptInterface fun openCallSettings() { runOnUiThread { if (!isOwnerAdmin()) { notifyStatus("Only Asbay can change default phone-app settings. Verify biometrically first."); return@runOnUiThread }; try { startActivity(Intent(android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)) } catch (_: Exception) { notifyStatus("Android call settings could not be opened.") } } }
         @JavascriptInterface fun notifyWeb(message: String) { runOnUiThread { notifyStatus(message) } }
     }
+
+    private fun showAiLoginDialog() {
+        val username = EditText(this).apply { hint = "DEJA gateway username"; singleLine = true }
+        val password = EditText(this).apply { hint = "DEJA gateway password"; singleLine = true; inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 8, 48, 0); addView(username); addView(password) }
+        AlertDialog.Builder(this).setTitle("Connect DEJA AI")
+            .setMessage("Enter the private gateway login configured by the DEJA service administrator. This is not your OpenAI API key.")
+            .setView(box).setNegativeButton("Cancel") { _, _ -> notifyStatus("DEJA AI sign-in cancelled.") }
+            .setPositiveButton("Sign in") { _, _ -> authenticateAi(username.text.toString(), password.text.toString()) }
+            .show()
+    }
+
+    private fun authenticateAi(username: String, password: String) {
+        if (username.isBlank() || password.isBlank() || username.length > 120 || password.length > 256) { notifyStatus("Enter the DEJA gateway username and password."); return }
+        val baseUrl = BuildConfig.DEJA_API_BASE_URL.trim().trimEnd('/')
+        if (!baseUrl.startsWith("https://")) { notifyStatus("DEJA AI sign-in requires a configured HTTPS gateway URL."); return }
+        aiExecutor.execute {
+            var connection: HttpURLConnection? = null
+            try {
+                connection = (URL("$baseUrl/v1/auth/login").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"; connectTimeout = 15000; readTimeout = 20000; doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                }
+                val body = org.json.JSONObject().put("username", username).put("password", password).toString()
+                OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { it.write(body) }
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val responseText = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                if (code !in 200..299) throw IllegalStateException("Sign-in failed (HTTP $code). Check the gateway credentials and deployment settings.")
+                val token = org.json.JSONObject(responseText).optString("access_token")
+                if (token.isBlank()) throw IllegalStateException("The gateway did not return an access token.")
+                saveAiToken(token)
+                runOnUiThread { web.evaluateJavascript("window.onDejaAiAuthResponse && window.onDejaAiAuthResponse(true, 'DEJA AI connected securely.')", null) }
+            } catch (e: Exception) {
+                val message = e.message?.take(180) ?: "Could not sign in to DEJA AI."
+                runOnUiThread { web.evaluateJavascript("window.onDejaAiAuthResponse && window.onDejaAiAuthResponse(false, ${org.json.JSONObject.quote(message)})", null) }
+            } finally { connection?.disconnect() }
+        }
+    }
+
+    private fun aiKeystoreKey(): SecretKey {
+        val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        val alias = "DEJA_AI_TOKEN_KEY"
+        val existing = keyStore.getKey(alias, null) as? SecretKey
+        if (existing != null) return existing
+        val generator = KeyGenerator.getInstance("AES", "AndroidKeyStore")
+        val spec = android.security.keystore.KeyGenParameterSpec.Builder(alias, android.security.keystore.KeyProperties.PURPOSE_ENCRYPT or android.security.keystore.KeyProperties.PURPOSE_DECRYPT)
+            .setBlockModes(android.security.keystore.KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(android.security.keystore.KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setRandomizedEncryptionRequired(true).build()
+        generator.init(spec)
+        return generator.generateKey()
+    }
+
+    private fun saveAiToken(token: String) {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, aiKeystoreKey())
+        val encrypted = cipher.doFinal(token.toByteArray(Charsets.UTF_8))
+        val packed = cipher.iv + encrypted
+        getSharedPreferences("deja_ai_auth", MODE_PRIVATE).edit().putString("token", Base64.encodeToString(packed, Base64.NO_WRAP)).commit()
+    }
+
+    private fun readAiToken(): String? {
+        return try {
+            val stored = getSharedPreferences("deja_ai_auth", MODE_PRIVATE).getString("token", null) ?: return null
+            val packed = Base64.decode(stored, Base64.NO_WRAP)
+            if (packed.size <= 12) return null
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, aiKeystoreKey(), GCMParameterSpec(128, packed.copyOfRange(0, 12)))
+            String(cipher.doFinal(packed.copyOfRange(12, packed.size)), Charsets.UTF_8)
+        } catch (_: Exception) { clearAiToken(); null }
+    }
+
+    private fun clearAiToken() { getSharedPreferences("deja_ai_auth", MODE_PRIVATE).edit().remove("token").apply() }
 
     /** Native-side authorization. The Web page is not trusted to enforce permissions. */
     private fun isOwnerAdmin(): Boolean {

@@ -1,23 +1,19 @@
-DEJA v0.7.0 — cloud build route (no Android SDK installation on your PC)
+DEJA v0.8.9 — Build the APK in GitHub Actions
 
-This ZIP is still Android source code, not an APK. The included GitHub Actions workflow can compile it on a GitHub-hosted Linux runner.
+This ZIP contains Android Studio source code and a repaired cloud-build workflow. It is NOT itself an APK.
 
-Steps:
-1. Create or sign in to a GitHub account.
-2. Create a NEW private repository, for example named DEJA-Android.
-3. Extract this ZIP on your PC.
-4. Upload the CONTENTS of the DEJA_Android_Project folder to the repository's main branch. Make sure the .github folder is included. On GitHub's upload page, hidden files may need to be included by using Git or GitHub Desktop.
-5. Open the repository's Actions tab and select "Build DEJA Android APK".
-6. Choose "Run workflow" if it did not start automatically after the upload.
-7. When the run succeeds, open that workflow run and download the artifact named "DEJA-debug-apk".
-8. Extract the artifact. It contains app-debug.apk. Transfer it to the Samsung phone and install it. Android may ask permission to install apps from that file manager; only allow it for the APK you built from this project.
+1. Extract this ZIP on your computer.
+2. Upload the CONTENTS of the DEJA_Android_Project folder to the existing private DEJA GitHub repository's main branch. Include the hidden .github folder.
+3. In GitHub, open the repository's Actions tab.
+4. Select "Build DEJA Android APK" and choose "Run workflow" (or wait for the push-triggered run).
+5. Open the completed workflow run. If it is green, download the artifact named "DEJA-debug-apk".
+6. Extract the artifact; it contains app-debug.apk.
 
-Alternative: Open this project in Android Studio and use Build > Build Bundle(s) / APK(s) > Build APK(s).
+If the workflow fails, open the run and share the FIRST red error message or a screenshot of that section. Do not share passwords, API keys, or other secrets.
 
-IMPORTANT:
-- The first build may fail if a source-code or dependency issue is found. Read the first red error in the Actions log; do not assume a failed build produced an APK.
-- A successful debug build is not a Play Store release and is not proof every feature works. Test on the phone.
-- This project is not an operating system. It is a normal Android app with supported Android integrations.
-- Voice recognition and text-to-speech depend on Android services and installed language packs. Dedicated Oshiwambo offline voice engine remains excluded at the user's request.
-- Calls, messages, biometric prompts, offline speech, and device-finder shortcuts are subject to Android/Samsung capabilities and permissions.
-- Keep the GitHub repository private because it contains your app source. Do not upload passwords, API keys, or private identity codes.
+Important status notes:
+- The previous failure was in Android SDK setup: the action tried to install the retired package "tools". This workflow now explicitly installs only platform-tools at that step, then installs platform 35 and build-tools 35.0.0.
+- The project has no configured production DEJA gateway URL by default. The APK can compile with the URL blank, but online AI chat will not connect until a trusted adult configures the HTTPS gateway endpoint and the backend is deployed. Never place the OpenAI API key in the app, GitHub source, or APK.
+- A debug APK is for testing, not a Play Store release. Install and test it on the intended Samsung phone before treating the build as complete.
+- Calls and messages remain user-confirmed Android actions; this app does not silently answer calls or send messages in the background.
+- Oshiwambo speech support still depends on a compatible recognition/speech provider and is not complete merely because the APK builds.
