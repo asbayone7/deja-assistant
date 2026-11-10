@@ -1,0 +1,14 @@
+DEJA v0.8.3 — Native profile permission enforcement
+
+Implemented in source:
+- Native-side permission checks for basic shortcuts, dialler, SMS composer, and WhatsApp share.
+- AILI/MAGGY can use phone and messaging actions only when signed in and the owner has granted the relevant permission.
+- Owner-only operations require both owner biometric verification and the ASBAY_OWNER session.
+- Successful profile login clears the owner verification state.
+- Device finder and default phone-app settings remain owner-only.
+- Permission screen reads saved permissions from Android app storage.
+
+Not implemented / not verified:
+- PIN lockout/rate limiting and recovery/reset flow.
+- Automatic calls or message sending.
+- APK build and physical-device testing.

@@ -1,0 +1,20 @@
+DEJA v0.8.8 — Deployment and connection status
+
+Prepared in source:
+- Render Blueprint includes private environment variables for OpenAI key and gateway login; Render generates the JWT signing secret.
+- `/health` reports service status and indicates authentication is required.
+- `/v1/auth/login` issues a signed 12-hour JWT after server-side credential verification.
+- `/v1/chat` requires a valid bearer token.
+- Login and chat endpoints are rate-limited.
+- Android native sign-in uses a masked password field and stores the access token encrypted with Android Keystore AES-GCM.
+- Android sends the bearer token, requests sign-in when missing/expired, and supports AI sign-out.
+
+Still requires account authorization and deployment:
+1. Push this project version to the existing private GitHub repository.
+2. Authorize Render to read that repository and deploy the root `render.yaml` Blueprint.
+3. In Render environment settings, add `OPENAI_API_KEY`, `DEJA_GATEWAY_USERNAME`, and `DEJA_GATEWAY_PASSWORD`; keep the generated `DEJA_JWT_SECRET` private.
+4. Confirm `/health` returns `ok: true` and `auth: required`.
+5. Build Android with the deployed HTTPS service URL using `-PDEJA_API_BASE_URL=https://YOUR-SERVICE.onrender.com`.
+6. Install on a test device, sign in using the gateway username/password, and test a simple AI question.
+
+No deployment, API credential setup, APK build, or live request has been performed by this package creation.

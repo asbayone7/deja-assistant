@@ -1,0 +1,6 @@
+DEJA v0.8.7 — Deployment preparation
+
+- Added Render Blueprint for the existing OpenAI backend.
+- Added Node.js 20 runtime, install/start commands, and health-check path.
+- Expanded backend deployment instructions and security gate.
+- No cloud deployment, API key setup, live request, or APK build has been performed.

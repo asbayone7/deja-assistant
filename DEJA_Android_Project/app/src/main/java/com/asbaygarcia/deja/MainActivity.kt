@@ -5,6 +5,9 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import java.net.HttpURLConnection
+import java.net.URL
+import java.io.OutputStreamWriter
 import android.os.Bundle
 import android.os.Build
 import android.speech.RecognizerIntent
@@ -15,19 +18,38 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebResourceRequest
 import android.widget.Toast
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import java.util.Locale
 import java.util.concurrent.Executor
+import java.security.SecureRandom
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+import java.security.KeyStore
+import android.util.Base64
+import android.app.AlertDialog
+import android.widget.EditText
+import android.text.InputType
+import android.widget.LinearLayout
 
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var web: WebView
     private var speech: SpeechRecognizer? = null
     private var tts: TextToSpeech? = null
+    private val aiExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private lateinit var biometricExecutor: Executor
-    private var ownerVerified = false
+    @Volatile private var ownerVerified = false
+    @Volatile private var activeProfile: String? = null
+    @Volatile private var activeProfileExpiresAt: Long = 0L
+    private val ownerSessionDurationMs = 5 * 60_000L
+    private val profileSessionDurationMs = 15 * 60_000L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -36,8 +58,29 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         web = WebView(this)
         web.settings.javaScriptEnabled = true
         web.settings.domStorageEnabled = true
+        // The bundled HTML needs file access to load, but local files must not
+        // be able to read other file/content URLs or cross-origin resources.
         web.settings.allowFileAccess = true
-        web.webViewClient = WebViewClient()
+        web.settings.allowContentAccess = false
+        web.settings.allowFileAccessFromFileURLs = false
+        web.settings.allowUniversalAccessFromFileURLs = false
+        web.settings.javaScriptCanOpenWindowsAutomatically = false
+        web.settings.setSupportMultipleWindows(false)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            web.settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
+        }
+        web.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                val target = request?.url?.toString().orEmpty()
+                // DEJA's only WebView document is its packaged local interface.
+                // All external navigation is blocked; native actions use Android intents.
+                return !target.startsWith("file:///android_asset/")
+            }
+            @Suppress("DEPRECATION")
+            override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                return !(url?.startsWith("file:///android_asset/") ?: false)
+            }
+        }
         web.webChromeClient = WebChromeClient()
         web.addJavascriptInterface(DejaBridge(), "DejaNative")
         setContentView(web)
@@ -77,29 +120,312 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 } catch (_: Exception) { notifyStatus("Voice recognition could not start. Type your command.") }
             }
         }
-        @JavascriptInterface fun speak(text: String, language: String) { runOnUiThread { val locale = when(language) { "pt-BR" -> Locale("pt", "BR"); "ng-NA" -> Locale("en", "NA"); else -> Locale.US }; tts?.language = locale; tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "DEJA_UTTERANCE") } }
+        @JavascriptInterface fun speak(text: String, language: String) { runOnUiThread {
+            val locale = when(language) { "pt-BR" -> Locale("pt", "BR"); "ng-NA" -> Locale("ng", "NA"); else -> Locale.US }
+            val engine = tts ?: return@runOnUiThread
+            if (engine.isLanguageAvailable(locale) < TextToSpeech.LANG_AVAILABLE) {
+                notifyStatus(if (language == "ng-NA") "Oshiwambo speech is not supported by the installed voice engine. The written response remains available." else "The selected voice is unavailable. The written response remains available.")
+                return@runOnUiThread
+            }
+            engine.language = locale
+            engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "DEJA_UTTERANCE")
+        } }
+        @JavascriptInterface fun requestAiLoginDialog() { runOnUiThread { showAiLoginDialog() } }
+        @JavascriptInterface fun signOutAi() {
+            clearAiToken()
+            runOnUiThread { web.evaluateJavascript("window.onDejaAiAuthResponse && window.onDejaAiAuthResponse(false, 'Signed out from DEJA AI.')", null) }
+        }
+        @JavascriptInterface fun askAi(message: String, language: String) {
+            val prompt = message.trim()
+            if (prompt.isEmpty() || prompt.length > 4000) { notifyStatus("Please enter a message under 4,000 characters."); return }
+            val baseUrl = BuildConfig.DEJA_API_BASE_URL.trim().trimEnd('/')
+            if (baseUrl.isEmpty()) { runOnUiThread { notifyStatus("OpenAI brain is not connected yet. Configure DEJA_API_BASE_URL and deploy the secure backend.") }; return }
+            val token = readAiToken()
+            if (token.isNullOrBlank()) { runOnUiThread { web.evaluateJavascript("window.onDejaAuthRequired && window.onDejaAuthRequired()", null) }; return }
+            aiExecutor.execute {
+                var connection: HttpURLConnection? = null
+                try {
+                    connection = (URL("$baseUrl/v1/chat").openConnection() as HttpURLConnection).apply {
+                        requestMethod = "POST"; connectTimeout = 15000; readTimeout = 45000
+                        doOutput = true; setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                        setRequestProperty("Authorization", "Bearer $token")
+                    }
+                    val body = org.json.JSONObject().put("message", prompt).put("language", language).toString()
+                    OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { it.write(body) }
+                    val code = connection.responseCode
+                    val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                    val responseText = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                    if (code == 401) {
+                        clearAiToken()
+                        runOnUiThread { web.evaluateJavascript("window.onDejaAuthRequired && window.onDejaAuthRequired()", null) }
+                        return@execute
+                    }
+                    if (code !in 200..299) throw IllegalStateException("AI service returned HTTP $code")
+                    val answer = org.json.JSONObject(responseText).optString("reply").trim()
+                    if (answer.isEmpty()) throw IllegalStateException("AI service returned an empty response")
+                    runOnUiThread { web.evaluateJavascript("window.onDejaAiResponse && window.onDejaAiResponse(${org.json.JSONObject.quote(answer)})", null) }
+                } catch (_: Exception) {
+                    runOnUiThread { web.evaluateJavascript("window.onDejaAiResponse && window.onDejaAiResponse('I could not reach the AI service. Check the internet connection and backend settings, then try again.')", null) }
+                } finally { connection?.disconnect() }
+            }
+        }
         @JavascriptInterface fun stopSpeaking() { runOnUiThread { tts?.stop(); notifyStatus("Voice stopped") } }
-        @JavascriptInterface fun openWifiSettings() { runOnUiThread { try { startActivity(Intent(android.provider.Settings.ACTION_WIFI_SETTINGS)) } catch (_: Exception) { notifyStatus("Wi-Fi settings could not be opened.") } } }
-        @JavascriptInterface fun openBluetoothSettings() { runOnUiThread { try { startActivity(Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)) } catch (_: Exception) { notifyStatus("Bluetooth settings could not be opened.") } } }
-        @JavascriptInterface fun openGeneralSettings() { runOnUiThread { try { startActivity(Intent(android.provider.Settings.ACTION_SETTINGS)) } catch (_: Exception) { notifyStatus("Settings could not be opened.") } } }
-        @JavascriptInterface fun openCamera() { runOnUiThread { try { startActivity(Intent("android.media.action.IMAGE_CAPTURE")) } catch (_: Exception) { notifyStatus("Camera app could not be opened.") } } }
-        @JavascriptInterface fun openContacts() { runOnUiThread { try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("content://contacts/people/"))) } catch (_: Exception) { notifyStatus("Contacts app could not be opened.") } } }
-        @JavascriptInterface fun setAlarm(hour: Int, minute: Int, label: String) { runOnUiThread { try { val i = Intent(android.provider.AlarmClock.ACTION_SET_ALARM).putExtra(android.provider.AlarmClock.EXTRA_HOUR, hour).putExtra(android.provider.AlarmClock.EXTRA_MINUTES, minute).putExtra(android.provider.AlarmClock.EXTRA_MESSAGE, label).putExtra(android.provider.AlarmClock.EXTRA_SKIP_UI, false); startActivity(i) } catch (_: Exception) { notifyStatus("Clock app could not open the alarm screen.") } } }
-        @JavascriptInterface fun openCalendar() { runOnUiThread { try { startActivity(Intent(Intent.ACTION_VIEW).setData(Uri.parse("content://com.android.calendar/time/"))) } catch (_: Exception) { notifyStatus("Calendar app could not be opened.") } } }
+        @JavascriptInterface fun openWifiSettings() { runOnUiThread { if (!hasAccess("basic")) return@runOnUiThread; try { startActivity(Intent(android.provider.Settings.ACTION_WIFI_SETTINGS)) } catch (_: Exception) { notifyStatus("Wi-Fi settings could not be opened.") } } }
+        @JavascriptInterface fun openBluetoothSettings() { runOnUiThread { if (!hasAccess("basic")) return@runOnUiThread; try { startActivity(Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)) } catch (_: Exception) { notifyStatus("Bluetooth settings could not be opened.") } } }
+        @JavascriptInterface fun openGeneralSettings() { runOnUiThread { if (!hasAccess("basic")) return@runOnUiThread; try { startActivity(Intent(android.provider.Settings.ACTION_SETTINGS)) } catch (_: Exception) { notifyStatus("Settings could not be opened.") } } }
+        @JavascriptInterface fun openCamera() { runOnUiThread { if (!hasAccess("basic")) return@runOnUiThread; try { startActivity(Intent("android.media.action.IMAGE_CAPTURE")) } catch (_: Exception) { notifyStatus("Camera app could not be opened.") } } }
+        @JavascriptInterface fun openContacts() { runOnUiThread { if (!hasAccess("basic")) return@runOnUiThread; try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("content://contacts/people/"))) } catch (_: Exception) { notifyStatus("Contacts app could not be opened.") } } }
+        @JavascriptInterface fun setAlarm(hour: Int, minute: Int, label: String) { runOnUiThread { if (!hasAccess("basic")) return@runOnUiThread; try { val i = Intent(android.provider.AlarmClock.ACTION_SET_ALARM).putExtra(android.provider.AlarmClock.EXTRA_HOUR, hour).putExtra(android.provider.AlarmClock.EXTRA_MINUTES, minute).putExtra(android.provider.AlarmClock.EXTRA_MESSAGE, label).putExtra(android.provider.AlarmClock.EXTRA_SKIP_UI, false); startActivity(i) } catch (_: Exception) { notifyStatus("Clock app could not open the alarm screen.") } } }
+        @JavascriptInterface fun openCalendar() { runOnUiThread { if (!hasAccess("basic")) return@runOnUiThread; try { startActivity(Intent(Intent.ACTION_VIEW).setData(Uri.parse("content://com.android.calendar/time/"))) } catch (_: Exception) { notifyStatus("Calendar app could not be opened.") } } }
         @JavascriptInterface fun verifyOwner() { runOnUiThread { verifyOwnerBiometric() } }
-        @JavascriptInterface fun isOwnerVerified(): Boolean = ownerVerified
-        @JavascriptInterface fun dial(number: String) { runOnUiThread { if (!ownerVerified) { notifyStatus("Verify Asbay first to use phone actions."); return@runOnUiThread }; try { startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:${Uri.encode(number)}"))) } catch (_: Exception) { notifyStatus("Phone dialler is unavailable.") } } }
-        @JavascriptInterface fun composeSms(number: String, message: String) { runOnUiThread { if (!ownerVerified) { notifyStatus("Verify Asbay first to use messaging actions."); return@runOnUiThread }; try { val i = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:${Uri.encode(number)}")); i.putExtra("sms_body", message); startActivity(i) } catch (_: Exception) { notifyStatus("Messaging app is unavailable.") } } }
-        @JavascriptInterface fun shareWhatsApp(message: String) { runOnUiThread { if (!ownerVerified) { notifyStatus("Verify Asbay first to share a message."); return@runOnUiThread }; try { val i = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, message); setPackage("com.whatsapp") }; startActivity(i) } catch (_: Exception) { notifyStatus("WhatsApp is not installed. You can use the SMS option instead.") } } }
-        @JavascriptInterface fun openDeviceFinder() { runOnUiThread { if (!ownerVerified) { notifyStatus("Verify Asbay first to open device security."); return@runOnUiThread }; try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://android.com/find"))) } catch (_: Exception) { notifyStatus("Could not open device finder.") } } }
+        // Individual profile PINs are enrolled on-device; only salted hashes are stored.
+        @JavascriptInterface fun registerProfile(profile: String, pin: String): Boolean {
+            if (!isOwnerAdmin() || (profile != "AILI" && profile != "MAGGY")) return false
+            if (pin.length !in 6..12 || !pin.all { it.isDigit() }) return false
+            return try {
+                val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
+                val hash = profilePinHash(pin, salt)
+                getSharedPreferences("deja_profile_identity", MODE_PRIVATE).edit()
+                    .putString("${profile}_salt", android.util.Base64.encodeToString(salt, android.util.Base64.NO_WRAP))
+                    .putString("${profile}_hash", android.util.Base64.encodeToString(hash, android.util.Base64.NO_WRAP))
+                    .putBoolean("${profile}_registered", true)
+                    .putInt("${profile}_failed_attempts", 0)
+                    .putLong("${profile}_lock_until", 0L).apply()
+                true
+            } catch (_: Exception) { false }
+        }
+        @JavascriptInterface fun loginProfile(profile: String, pin: String): Boolean {
+            if (profile != "AILI" && profile != "MAGGY") return false
+            if (pin.length !in 6..12 || !pin.all { it.isDigit() }) return false
+            return try {
+                val prefs = getSharedPreferences("deja_profile_identity", MODE_PRIVATE)
+                if (!prefs.getBoolean("${profile}_registered", false)) return false
+                val now = System.currentTimeMillis()
+                val lockUntil = prefs.getLong("${profile}_lock_until", 0L)
+                if (now < lockUntil) return false
+                val salt = android.util.Base64.decode(prefs.getString("${profile}_salt", "") ?: "", android.util.Base64.NO_WRAP)
+                val expected = android.util.Base64.decode(prefs.getString("${profile}_hash", "") ?: "", android.util.Base64.NO_WRAP)
+                val actual = profilePinHash(pin, salt)
+                val valid = java.security.MessageDigest.isEqual(expected, actual)
+                if (valid) {
+                    prefs.edit().putInt("${profile}_failed_attempts", 0).putLong("${profile}_lock_until", 0L).apply()
+                    ownerVerified = false
+                    activeProfile = profile
+                    activeProfileExpiresAt = now + profileSessionDurationMs
+                } else {
+                    val failures = (prefs.getInt("${profile}_failed_attempts", 0) + 1).coerceAtMost(15)
+                    val cooldown = when { failures >= 15 -> 30 * 60_000L; failures >= 10 -> 5 * 60_000L; failures >= 5 -> 60_000L; else -> 0L }
+                    prefs.edit().putInt("${profile}_failed_attempts", failures)
+                        .putLong("${profile}_lock_until", if (cooldown > 0) now + cooldown else 0L).apply()
+                }
+                valid
+            } catch (_: Exception) { false }
+        }
+        @JavascriptInterface fun getRegisteredProfiles(): String {
+            val prefs = getSharedPreferences("deja_profile_identity", MODE_PRIVATE)
+            return org.json.JSONObject().put("AILI", prefs.getBoolean("AILI_registered", false))
+                .put("MAGGY", prefs.getBoolean("MAGGY_registered", false)).toString()
+        }
+        @JavascriptInterface fun getProfileLoginStatus(profile: String): String {
+            if (profile != "AILI" && profile != "MAGGY") return "Invalid profile."
+            val prefs = getSharedPreferences("deja_profile_identity", MODE_PRIVATE)
+            if (!prefs.getBoolean("${profile}_registered", false)) return "Not registered. Ask Asbay to register this profile."
+            val remaining = prefs.getLong("${profile}_lock_until", 0L) - System.currentTimeMillis()
+            if (remaining > 0) return "Temporarily locked. Try again in ${((remaining + 999) / 1000)} seconds, or ask Asbay to reset the profile."
+            val failures = prefs.getInt("${profile}_failed_attempts", 0)
+            return if (failures >= 15) "Repeated failed attempts: a 30-minute pause applies after each failed attempt. Ask Asbay to reset the profile if needed."
+                else "Profile ready for PIN verification. Failed attempts: $failures. A temporary pause starts after five failed attempts."
+        }
+        @JavascriptInterface fun resetProfile(profile: String): Boolean {
+            if (!isOwnerAdmin() || (profile != "AILI" && profile != "MAGGY")) return false
+            return try {
+                getSharedPreferences("deja_profile_identity", MODE_PRIVATE).edit()
+                    .remove("${profile}_salt").remove("${profile}_hash")
+                    .remove("${profile}_registered").remove("${profile}_failed_attempts")
+                    .remove("${profile}_lock_until").commit()
+                getSharedPreferences("deja_access_policy", MODE_PRIVATE).edit()
+                    .remove("${profile}_basic").remove("${profile}_phone")
+                    .remove("${profile}_messages").remove("${profile}_security").commit()
+                if (activeProfile == profile) { activeProfile = null; ownerVerified = false; activeProfileExpiresAt = 0L }
+                true
+            } catch (_: Exception) { false }
+        }
+        @JavascriptInterface fun isOwnerVerified(): Boolean = isOwnerAdmin()
+        @JavascriptInterface fun getSessionStatus(): String {
+            val role = when {
+                isOwnerAdmin() -> "OWNER"
+                activeProfile == "AILI" && System.currentTimeMillis() < activeProfileExpiresAt -> "AILI"
+                activeProfile == "MAGGY" && System.currentTimeMillis() < activeProfileExpiresAt -> "MAGGY"
+                else -> {
+                    activeProfile = null
+                    activeProfileExpiresAt = 0L
+                    ownerVerified = false
+                    "LOCKED"
+                }
+            }
+            return role
+        }
+        @JavascriptInterface fun signOut() {
+            ownerVerified = false
+            activeProfile = null
+            activeProfileExpiresAt = 0L
+            runOnUiThread {
+                web.evaluateJavascript("window.onSessionChanged && window.onSessionChanged('LOCKED')", null)
+                notifyStatus("Signed out. Owner and profile permissions are locked.")
+            }
+        }
+        @JavascriptInterface fun dial(number: String) { runOnUiThread { if (!hasAccess("phone")) return@runOnUiThread; try { startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:${Uri.encode(number)}"))) } catch (_: Exception) { notifyStatus("Phone dialler is unavailable.") } } }
+        @JavascriptInterface fun composeSms(number: String, message: String) { runOnUiThread { if (!hasAccess("messages")) return@runOnUiThread; try { val i = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:${Uri.encode(number)}")); i.putExtra("sms_body", message); startActivity(i) } catch (_: Exception) { notifyStatus("Messaging app is unavailable.") } } }
+        @JavascriptInterface fun shareWhatsApp(message: String) { runOnUiThread { if (!hasAccess("messages")) return@runOnUiThread; try { val i = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, message); setPackage("com.whatsapp") }; startActivity(i) } catch (_: Exception) { notifyStatus("WhatsApp is not installed. You can use the SMS option instead.") } } }
+        @JavascriptInterface fun openDeviceFinder() { runOnUiThread { if (!hasAccess("security")) return@runOnUiThread; try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://android.com/find"))) } catch (_: Exception) { notifyStatus("Could not open device finder.") } } }
+        // Backup data can contain private notes and settings, so the native layer
+        // independently enforces owner verification instead of trusting the Web UI.
         @JavascriptInterface fun encryptBackup(json: String): String {
+            if (!isOwnerAdmin()) return "ERROR: Verify the owner before creating a backup."
             return try { DejaCrypto.encrypt(json) } catch (_: Exception) { "ERROR: Could not encrypt backup on this device." }
         }
         @JavascriptInterface fun decryptBackup(payload: String): String {
+            if (!isOwnerAdmin()) return "ERROR: Verify the owner before restoring a backup."
             return try { DejaCrypto.decrypt(payload) } catch (_: Exception) { "ERROR: Backup cannot be decrypted on this device. Backups are tied to the phone that created them." }
         }
-        @JavascriptInterface fun openCallSettings() { runOnUiThread { try { startActivity(Intent(android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)) } catch (_: Exception) { notifyStatus("Android call settings could not be opened.") } } }
+        @JavascriptInterface fun saveProfilePermissions(profile: String, basic: Boolean, phone: Boolean, messages: Boolean, security: Boolean): Boolean {
+            if (!isOwnerAdmin() || (profile != "AILI" && profile != "MAGGY")) return false
+            return try {
+                getSharedPreferences("deja_access_policy", MODE_PRIVATE).edit()
+                    .putBoolean("${profile}_basic", basic)
+                    .putBoolean("${profile}_phone", phone)
+                    .putBoolean("${profile}_messages", messages)
+                    .putBoolean("${profile}_security", false)
+                    .apply()
+                true
+            } catch (_: Exception) { false }
+        }
+        @JavascriptInterface fun getProfilePermissions(profile: String): String {
+            if (profile != "AILI" && profile != "MAGGY") return "{}"
+            val prefs = getSharedPreferences("deja_access_policy", MODE_PRIVATE)
+            val result = org.json.JSONObject()
+                .put("basic", prefs.getBoolean("${profile}_basic", true))
+                .put("phone", prefs.getBoolean("${profile}_phone", false))
+                .put("messages", prefs.getBoolean("${profile}_messages", false))
+                .put("security", false)
+            return result.toString()
+        }
+        @JavascriptInterface fun openCallSettings() { runOnUiThread { if (!isOwnerAdmin()) { notifyStatus("Only Asbay can change default phone-app settings. Verify biometrically first."); return@runOnUiThread }; try { startActivity(Intent(android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)) } catch (_: Exception) { notifyStatus("Android call settings could not be opened.") } } }
         @JavascriptInterface fun notifyWeb(message: String) { runOnUiThread { notifyStatus(message) } }
+    }
+
+    private fun showAiLoginDialog() {
+        val username = EditText(this).apply { hint = "DEJA gateway username"; singleLine = true }
+        val password = EditText(this).apply { hint = "DEJA gateway password"; singleLine = true; inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 8, 48, 0); addView(username); addView(password) }
+        AlertDialog.Builder(this).setTitle("Connect DEJA AI")
+            .setMessage("Enter the private gateway login configured by the DEJA service administrator. This is not your OpenAI API key.")
+            .setView(box).setNegativeButton("Cancel") { _, _ -> notifyStatus("DEJA AI sign-in cancelled.") }
+            .setPositiveButton("Sign in") { _, _ -> authenticateAi(username.text.toString(), password.text.toString()) }
+            .show()
+    }
+
+    private fun authenticateAi(username: String, password: String) {
+        if (username.isBlank() || password.isBlank() || username.length > 120 || password.length > 256) { notifyStatus("Enter the DEJA gateway username and password."); return }
+        val baseUrl = BuildConfig.DEJA_API_BASE_URL.trim().trimEnd('/')
+        if (!baseUrl.startsWith("https://")) { notifyStatus("DEJA AI sign-in requires a configured HTTPS gateway URL."); return }
+        aiExecutor.execute {
+            var connection: HttpURLConnection? = null
+            try {
+                connection = (URL("$baseUrl/v1/auth/login").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"; connectTimeout = 15000; readTimeout = 20000; doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                }
+                val body = org.json.JSONObject().put("username", username).put("password", password).toString()
+                OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { it.write(body) }
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val responseText = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                if (code !in 200..299) throw IllegalStateException("Sign-in failed (HTTP $code). Check the gateway credentials and deployment settings.")
+                val token = org.json.JSONObject(responseText).optString("access_token")
+                if (token.isBlank()) throw IllegalStateException("The gateway did not return an access token.")
+                saveAiToken(token)
+                runOnUiThread { web.evaluateJavascript("window.onDejaAiAuthResponse && window.onDejaAiAuthResponse(true, 'DEJA AI connected securely.')", null) }
+            } catch (e: Exception) {
+                val message = e.message?.take(180) ?: "Could not sign in to DEJA AI."
+                runOnUiThread { web.evaluateJavascript("window.onDejaAiAuthResponse && window.onDejaAiAuthResponse(false, ${org.json.JSONObject.quote(message)})", null) }
+            } finally { connection?.disconnect() }
+        }
+    }
+
+    private fun aiKeystoreKey(): SecretKey {
+        val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        val alias = "DEJA_AI_TOKEN_KEY"
+        val existing = keyStore.getKey(alias, null) as? SecretKey
+        if (existing != null) return existing
+        val generator = KeyGenerator.getInstance("AES", "AndroidKeyStore")
+        val spec = android.security.keystore.KeyGenParameterSpec.Builder(alias, android.security.keystore.KeyProperties.PURPOSE_ENCRYPT or android.security.keystore.KeyProperties.PURPOSE_DECRYPT)
+            .setBlockModes(android.security.keystore.KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(android.security.keystore.KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setRandomizedEncryptionRequired(true).build()
+        generator.init(spec)
+        return generator.generateKey()
+    }
+
+    private fun saveAiToken(token: String) {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, aiKeystoreKey())
+        val encrypted = cipher.doFinal(token.toByteArray(Charsets.UTF_8))
+        val packed = cipher.iv + encrypted
+        getSharedPreferences("deja_ai_auth", MODE_PRIVATE).edit().putString("token", Base64.encodeToString(packed, Base64.NO_WRAP)).commit()
+    }
+
+    private fun readAiToken(): String? {
+        return try {
+            val stored = getSharedPreferences("deja_ai_auth", MODE_PRIVATE).getString("token", null) ?: return null
+            val packed = Base64.decode(stored, Base64.NO_WRAP)
+            if (packed.size <= 12) return null
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, aiKeystoreKey(), GCMParameterSpec(128, packed.copyOfRange(0, 12)))
+            String(cipher.doFinal(packed.copyOfRange(12, packed.size)), Charsets.UTF_8)
+        } catch (_: Exception) { clearAiToken(); null }
+    }
+
+    private fun clearAiToken() { getSharedPreferences("deja_ai_auth", MODE_PRIVATE).edit().remove("token").apply() }
+
+    /** Native-side authorization. The Web page is not trusted to enforce permissions. */
+    private fun isOwnerAdmin(): Boolean {
+        if (ownerVerified && activeProfile == "ASBAY_OWNER" && System.currentTimeMillis() < activeProfileExpiresAt) return true
+        if (activeProfile == "ASBAY_OWNER") {
+            ownerVerified = false
+            activeProfile = null
+            activeProfileExpiresAt = 0L
+        }
+        return false
+    }
+
+    private fun hasAccess(permission: String): Boolean {
+        if (isOwnerAdmin()) return true
+        if ((activeProfile == "AILI" || activeProfile == "MAGGY") && System.currentTimeMillis() >= activeProfileExpiresAt) {
+            activeProfile = null
+            activeProfileExpiresAt = 0L
+            ownerVerified = false
+            notifyStatus("Your DEJA profile session expired. Verify your profile again.")
+        }
+        if (permission == "security") {
+            notifyStatus("Security and anti-theft controls are owner-only. Verify Asbay biometrically.")
+            return false
+        }
+        val profile = activeProfile
+        if (profile != "AILI" && profile != "MAGGY") {
+            notifyStatus("Access denied. Verify Asbay or sign in with an authorized profile.")
+            return false
+        }
+        val prefs = getSharedPreferences("deja_access_policy", MODE_PRIVATE)
+        val allowed = prefs.getBoolean("${profile}_${permission}", permission == "basic")
+        if (!allowed) notifyStatus("Access denied: Asbay has not granted $permission permission to $profile.")
+        return allowed
+    }
+
+    private fun profilePinHash(pin: String, salt: ByteArray): ByteArray {
+        val spec = PBEKeySpec(pin.toCharArray(), salt, 160_000, 256)
+        return try { SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded }
+        finally { spec.clearPassword() }
     }
 
     private fun verifyOwnerBiometric() {
@@ -107,7 +433,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val can = manager.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG)
         if (can != BiometricManager.BIOMETRIC_SUCCESS) { notifyStatus("Set up a strong fingerprint or face biometric in Android Settings first."); return }
         val prompt = BiometricPrompt(this, biometricExecutor, object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) { super.onAuthenticationSucceeded(result); ownerVerified = true; notifyStatus("Owner verified for this session."); web.evaluateJavascript("window.onOwnerVerified && window.onOwnerVerified(true)", null) }
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) { super.onAuthenticationSucceeded(result); ownerVerified = true; activeProfile = "ASBAY_OWNER"; activeProfileExpiresAt = System.currentTimeMillis() + ownerSessionDurationMs; notifyStatus("Owner verified. Owner access expires after 5 minutes."); web.evaluateJavascript("window.onOwnerVerified && window.onOwnerVerified(true); window.onSessionChanged && window.onSessionChanged('OWNER')", null) }
             override fun onAuthenticationFailed() { super.onAuthenticationFailed(); notifyStatus("Biometric not recognised. Try again.") }
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) { super.onAuthenticationError(errorCode, errString); notifyStatus("Verification cancelled or unavailable: $errString") }
         })
@@ -117,6 +443,6 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun notifyStatus(message: String) { if (::web.isInitialized) web.evaluateJavascript("document.getElementById('status').textContent=${org.json.JSONObject.quote(message)}", null) }
     override fun onInit(status: Int) { if (status == TextToSpeech.SUCCESS) tts?.language = Locale.US }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) { super.onRequestPermissionsResult(requestCode, permissions, grantResults); if (requestCode == 41 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) Toast.makeText(this, "DEJA microphone access enabled", Toast.LENGTH_SHORT).show() }
-    override fun onStop() { ownerVerified = false; super.onStop() }
-    override fun onDestroy() { speech?.destroy(); tts?.stop(); tts?.shutdown(); web.destroy(); super.onDestroy() }
+    override fun onStop() { ownerVerified = false; activeProfile = null; activeProfileExpiresAt = 0L; super.onStop() }
+    override fun onDestroy() { speech?.destroy(); tts?.stop(); tts?.shutdown(); aiExecutor.shutdownNow(); web.destroy(); super.onDestroy() }
 }

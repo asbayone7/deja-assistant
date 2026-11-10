@@ -1,0 +1,18 @@
+DEJA v0.8.7 — OpenAI gateway deployment preparation
+
+Added:
+- Render Blueprint (render.yaml) for the existing backend folder.
+- Node.js 20 runtime, npm install/start commands, and /health check configuration.
+- Deployment guide for setting OPENAI_API_KEY as a server-side secret.
+
+Not done:
+- No Render service has been created or deployed.
+- No OpenAI API key has been created or configured.
+- No live API request has been made.
+- No Android APK has been built with a live endpoint.
+- Gateway authentication is not implemented yet. The existing IP rate limit is not sufficient for public production use.
+
+Security:
+- Never put an OpenAI API key or shared gateway secret in the Android APK, source code, ZIP, Git repository, or chat.
+- Public deployment and live connection must wait until real user authentication, quotas, and monitoring are implemented.
+- API account, hosting account, and any billing setup must be managed by an authorized adult.

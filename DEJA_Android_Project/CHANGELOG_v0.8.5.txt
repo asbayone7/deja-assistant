@@ -1,0 +1,10 @@
+DEJA v0.8.5 — OpenAI connection foundation
+
+- Added Android-to-backend chat bridge using HTTPS-configurable DEJA_API_BASE_URL.
+- Added OpenAI Responses API gateway (Node.js) that reads OPENAI_API_KEY only from the server environment.
+- Added a 4,000-character input limit and basic per-IP request rate limiting in the gateway.
+- Online mode now routes unsupported general questions to the OpenAI bridge; offline local commands remain available.
+- Added internet permission and build-time endpoint configuration.
+- Documented call/SMS role requirements and current Oshiwambo speech-engine limitations.
+
+Not complete in this release: deployed backend, configured API credentials, public-endpoint authentication, automatic call answering, automatic SMS sending, verified Oshiwambo ASR/TTS, APK compilation, and physical Samsung testing.
